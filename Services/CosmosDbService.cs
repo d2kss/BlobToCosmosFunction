@@ -35,45 +35,64 @@ public class CosmosDbService : ICosmosDbService
         var connectionString = configuration["CosmosDBConnection"] 
             ?? throw new InvalidOperationException("CosmosDBConnection is not configured");
 
-        // Use 127.0.0.1 instead of localhost to avoid IPv6 and SSL handshake issues with emulator
-        connectionString = connectionString
-            .Replace("https://localhost:8081", "https://127.0.0.1:8081", StringComparison.OrdinalIgnoreCase)
-            .Replace("https://localhost:8081/", "https://127.0.0.1:8081/", StringComparison.OrdinalIgnoreCase);
-
-        // Ensure connection string has SSL validation disabled for emulator (avoids HttpRequestException)
-        if (!connectionString.Contains("DisableServerCertificateValidation", StringComparison.OrdinalIgnoreCase))
-        {
-            connectionString = connectionString.TrimEnd(';') + ";DisableServerCertificateValidation=true;";
-            _logger.LogInformation("CosmosDB connection string updated for emulator SSL bypass");
-        }
-
         _databaseName = configuration["CosmosDBDatabaseName"] ?? "BlobDataDB";
         _fileDataContainerName = configuration["CosmosDBContainerName"] ?? "ProcessedFiles";
         _phoneNumbersContainerName = configuration["CosmosDBPhoneNumbersContainerName"] ?? "PhoneNumbers";
 
-        // Configure CosmosClient to ignore certificate errors for emulator (HTTP + TCP)
+        // Detect emulator vs Azure Cosmos DB (Azure endpoint contains "documents.azure.com")
+        var isEmulator = IsEmulatorConnectionString(connectionString);
+
+        if (isEmulator)
+        {
+            // Emulator: use 127.0.0.1 to avoid IPv6/SSL issues; enable SSL bypass for self-signed cert
+            connectionString = connectionString
+                .Replace("https://localhost:8081", "https://127.0.0.1:8081", StringComparison.OrdinalIgnoreCase)
+                .Replace("https://localhost:8081/", "https://127.0.0.1:8081/", StringComparison.OrdinalIgnoreCase);
+            // Docs require exact "DisableServerCertificateValidation=True" (capital T)
+            if (!connectionString.Contains("DisableServerCertificateValidation", StringComparison.OrdinalIgnoreCase))
+                connectionString = connectionString.TrimEnd(';') + ";DisableServerCertificateValidation=True;";
+            _logger.LogInformation("CosmosDB mode: Emulator (SSL bypass enabled)");
+        }
+        else
+        {
+            _logger.LogInformation("CosmosDB mode: Azure (production)");
+        }
+
         var cosmosClientOptions = new CosmosClientOptions
         {
             ConnectionMode = ConnectionMode.Gateway,
             RequestTimeout = TimeSpan.FromSeconds(30),
             MaxRetryAttemptsOnRateLimitedRequests = 3,
-            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
-            // Bypass SSL validation for emulator self-signed certificate (used for all connections)
-            ServerCertificateCustomValidationCallback = (X509Certificate2 cert, X509Chain chain, SslPolicyErrors errors) => true,
-            HttpClientFactory = () =>
+            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30)
+        };
+
+        // Only bypass SSL for emulator (Azure Cosmos DB uses valid certificates).
+        // Use HttpClientHandler so all Gateway HTTP calls (including CreateDatabaseIfNotExistsAsync) use the same bypass.
+        if (isEmulator)
+        {
+            cosmosClientOptions.ServerCertificateCustomValidationCallback = (X509Certificate2 cert, X509Chain chain, SslPolicyErrors errors) => true;
+            cosmosClientOptions.HttpClientFactory = () =>
             {
                 var handler = new HttpClientHandler
                 {
-                    ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true,
+                    ServerCertificateCustomValidationCallback = (_, _, _, _) => true,
                     CheckCertificateRevocationList = false
                 };
                 return new HttpClient(handler);
-            }
-        };
+            };
+        }
 
         _cosmosClient = new CosmosClient(connectionString, cosmosClientOptions);
-        _logger.LogInformation("CosmosClient created. Database: {DatabaseName}, Containers: {FileContainer}, {PhoneContainer}", 
+        _logger.LogInformation("CosmosClient created. Database: {DatabaseName}, Containers: {FileContainer}, {PhoneContainer}",
             _databaseName, _fileDataContainerName, _phoneNumbersContainerName);
+    }
+
+    /// <summary>True if connection string points to local emulator (localhost/127.0.0.1:8081).</summary>
+    private static bool IsEmulatorConnectionString(string connectionString)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString)) return false;
+        return connectionString.Contains("localhost:8081", StringComparison.OrdinalIgnoreCase)
+               || connectionString.Contains("127.0.0.1:8081", StringComparison.OrdinalIgnoreCase);
     }
 
     public async Task InitializeAsync()
@@ -83,7 +102,7 @@ public class CosmosDbService : ICosmosDbService
             _logger.LogInformation("Initializing CosmosDB database and container...");
             _logger.LogInformation("Connecting to CosmosDB at: {Endpoint}", _cosmosClient.Endpoint?.ToString() ?? "unknown");
 
-            // Test connection with retry (emulator may still be starting - avoids "unexpected EOF" during SSL handshake)
+            // Skip ReadAccountAsync (often fails with SSL on emulator). Create database directly with retry.
             const int maxRetries = 5;
             const int delayMs = 3000;
             Exception? lastEx = null;
@@ -91,27 +110,31 @@ public class CosmosDbService : ICosmosDbService
             {
                 try
                 {
-                    var accountProperties = await _cosmosClient.ReadAccountAsync();
-                    _logger.LogInformation("Successfully connected to CosmosDB. Account: {AccountName}", accountProperties.Id);
+                    _database = await _cosmosClient.CreateDatabaseIfNotExistsAsync(_databaseName);
+                    _logger.LogInformation("Successfully connected to CosmosDB. Database: {DatabaseName}", _databaseName);
                     lastEx = null;
                     break;
                 }
                 catch (Exception ex)
                 {
                     lastEx = ex;
-                    _logger.LogWarning(ex, "CosmosDB connection attempt {Attempt}/{Max} failed. Retrying in {Delay}ms...", attempt, maxRetries, delayMs);
+                    _logger.LogWarning(ex, "CosmosDB init attempt {Attempt}/{Max} failed. Retrying in {Delay}ms...", attempt, maxRetries, delayMs);
                     if (attempt < maxRetries)
                         await Task.Delay(delayMs);
                 }
             }
-            if (lastEx != null)
+            if (lastEx != null || _database == null)
             {
-                _logger.LogError(lastEx, "Failed to connect to CosmosDB emulator after {Max} attempts. Ensure it's running at https://127.0.0.1:8081/", maxRetries);
-                throw new InvalidOperationException($"Cannot connect to CosmosDB emulator. Please ensure it's running. Error: {lastEx.Message}", lastEx);
+                var ex = lastEx ?? new InvalidOperationException("Database creation returned null");
+                _logger.LogError(ex, "Failed to connect to CosmosDB emulator after {Max} attempts. Ensure it's running at https://127.0.0.1:8081/", maxRetries);
+                var hint = (lastEx?.Message?.Contains("SSL", StringComparison.OrdinalIgnoreCase) == true ||
+                            lastEx?.Message?.Contains("certificate", StringComparison.OrdinalIgnoreCase) == true)
+                    ? " If SSL/certificate errors persist (e.g. corporate proxy), set \"UseLocalStorage\": \"true\" in local.settings.json to use local JSON storage instead."
+                    : "";
+                throw new InvalidOperationException($"Cannot connect to CosmosDB emulator. Please ensure it's running. Error: {ex.Message}.{hint}", ex);
             }
 
-            // Create database if it doesn't exist
-            _database = await _cosmosClient.CreateDatabaseIfNotExistsAsync(_databaseName);
+            // Create database already done above; continue with containers
             _logger.LogInformation("Database '{DatabaseName}' is ready", _databaseName);
 
             // Create FileData container if it doesn't exist

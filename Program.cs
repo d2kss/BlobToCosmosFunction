@@ -7,21 +7,33 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-// Required for Cosmos DB emulator: bypass SSL validation and use TLS 1.2 (avoids "unexpected EOF" / SSL handshake failure)
+// TLS 1.2/1.3 for Cosmos DB
 ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls13;
-ServicePointManager.ServerCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => true;
+
+// When using emulator, bypass SSL process-wide (Cosmos SDK may use HTTP paths that ignore CosmosClientOptions)
+TryEnableEmulatorSslBypass();
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
-    .ConfigureServices(services =>
+    .ConfigureServices((context, services) =>
     {
         // Register services
         services.AddSingleton<IBlobStorageService, BlobStorageService>();
         services.AddSingleton<IFileParserService, FileParserService>();
         services.AddSingleton<IPhoneNumberService, PhoneNumberService>();
-        services.AddSingleton<ICosmosDbService, CosmosDbService>();
 
-        // Initialize CosmosDB on startup
+        // Use local JSON storage (no SSL) when corporate firewall blocks Cosmos DB emulator
+        var useLocalStorage = context.Configuration["UseLocalStorage"];
+        if (string.Equals(useLocalStorage, "true", StringComparison.OrdinalIgnoreCase))
+        {
+            services.AddSingleton<ICosmosDbService, LocalStorageCosmosDbService>();
+        }
+        else
+        {
+            services.AddSingleton<ICosmosDbService, CosmosDbService>();
+        }
+
+        // Initialize CosmosDB or local storage on startup
         services.AddSingleton<IHostedService, CosmosDbInitializationService>();
     })
     .ConfigureLogging(logging =>
@@ -33,16 +45,30 @@ var host = new HostBuilder()
 // Log startup information
 var loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
 var logger = loggerFactory.CreateLogger("Startup");
+var config = host.Services.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>();
+var useLocal = config["UseLocalStorage"];
 logger.LogInformation("========================================");
 logger.LogInformation("Azure Function Starting...");
-logger.LogInformation("Blob Trigger Configuration:");
-logger.LogInformation("  - Container: input-files");
-logger.LogInformation("  - Pattern: input-files/{{name}}");
-logger.LogInformation("  - Polling Interval: 1 second");
-logger.LogInformation("  - Connection: AzureWebJobsStorage");
+logger.LogInformation("  - Storage: {Mode}", string.Equals(useLocal, "true", StringComparison.OrdinalIgnoreCase) ? "Local (no SSL)" : "Cosmos DB");
+logger.LogInformation("Blob Trigger: input-files/{{name}}, Polling: 1s");
 logger.LogInformation("========================================");
 
 host.Run();
+
+static void TryEnableEmulatorSslBypass()
+{
+    try
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "local.settings.json");
+        if (!File.Exists(path)) return;
+        var json = File.ReadAllText(path);
+        var isEmulator = json.Contains("localhost:8081", StringComparison.OrdinalIgnoreCase)
+                         || json.Contains("127.0.0.1:8081", StringComparison.OrdinalIgnoreCase);
+        if (!isEmulator) return;
+        ServicePointManager.ServerCertificateValidationCallback = (_, _, _, _) => true;
+    }
+    catch { /* ignore */ }
+}
 
 // Service to initialize CosmosDB on startup
 public class CosmosDbInitializationService : IHostedService
