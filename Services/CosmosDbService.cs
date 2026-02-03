@@ -35,6 +35,11 @@ public class CosmosDbService : ICosmosDbService
         var connectionString = configuration["CosmosDBConnection"] 
             ?? throw new InvalidOperationException("CosmosDBConnection is not configured");
 
+        // Use 127.0.0.1 instead of localhost to avoid IPv6 and SSL handshake issues with emulator
+        connectionString = connectionString
+            .Replace("https://localhost:8081", "https://127.0.0.1:8081", StringComparison.OrdinalIgnoreCase)
+            .Replace("https://localhost:8081/", "https://127.0.0.1:8081/", StringComparison.OrdinalIgnoreCase);
+
         // Ensure connection string has SSL validation disabled for emulator (avoids HttpRequestException)
         if (!connectionString.Contains("DisableServerCertificateValidation", StringComparison.OrdinalIgnoreCase))
         {
@@ -59,7 +64,8 @@ public class CosmosDbService : ICosmosDbService
             {
                 var handler = new HttpClientHandler
                 {
-                    ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true
+                    ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true,
+                    CheckCertificateRevocationList = false
                 };
                 return new HttpClient(handler);
             }
@@ -77,16 +83,31 @@ public class CosmosDbService : ICosmosDbService
             _logger.LogInformation("Initializing CosmosDB database and container...");
             _logger.LogInformation("Connecting to CosmosDB at: {Endpoint}", _cosmosClient.Endpoint?.ToString() ?? "unknown");
 
-            // Test connection first
-            try
+            // Test connection with retry (emulator may still be starting - avoids "unexpected EOF" during SSL handshake)
+            const int maxRetries = 5;
+            const int delayMs = 3000;
+            Exception? lastEx = null;
+            for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
-                var accountProperties = await _cosmosClient.ReadAccountAsync();
-                _logger.LogInformation("Successfully connected to CosmosDB. Account: {AccountName}", accountProperties.Id);
+                try
+                {
+                    var accountProperties = await _cosmosClient.ReadAccountAsync();
+                    _logger.LogInformation("Successfully connected to CosmosDB. Account: {AccountName}", accountProperties.Id);
+                    lastEx = null;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    lastEx = ex;
+                    _logger.LogWarning(ex, "CosmosDB connection attempt {Attempt}/{Max} failed. Retrying in {Delay}ms...", attempt, maxRetries, delayMs);
+                    if (attempt < maxRetries)
+                        await Task.Delay(delayMs);
+                }
             }
-            catch (Exception ex)
+            if (lastEx != null)
             {
-                _logger.LogError(ex, "Failed to connect to CosmosDB emulator. Make sure it's running at https://localhost:8081/");
-                throw new InvalidOperationException($"Cannot connect to CosmosDB emulator. Please ensure it's running. Error: {ex.Message}", ex);
+                _logger.LogError(lastEx, "Failed to connect to CosmosDB emulator after {Max} attempts. Ensure it's running at https://127.0.0.1:8081/", maxRetries);
+                throw new InvalidOperationException($"Cannot connect to CosmosDB emulator. Please ensure it's running. Error: {lastEx.Message}", lastEx);
             }
 
             // Create database if it doesn't exist

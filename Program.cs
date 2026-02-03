@@ -1,8 +1,15 @@
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
 using BlobToCosmosFunction.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+
+// Required for Cosmos DB emulator: bypass SSL validation and use TLS 1.2 (avoids "unexpected EOF" / SSL handshake failure)
+ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls13;
+ServicePointManager.ServerCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) => true;
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
