@@ -1,4 +1,6 @@
 using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
 using BlobToCosmosFunction.Models;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
@@ -33,13 +35,26 @@ public class CosmosDbService : ICosmosDbService
         var connectionString = configuration["CosmosDBConnection"] 
             ?? throw new InvalidOperationException("CosmosDBConnection is not configured");
 
+        // Ensure connection string has SSL validation disabled for emulator (avoids HttpRequestException)
+        if (!connectionString.Contains("DisableServerCertificateValidation", StringComparison.OrdinalIgnoreCase))
+        {
+            connectionString = connectionString.TrimEnd(';') + ";DisableServerCertificateValidation=true;";
+            _logger.LogInformation("CosmosDB connection string updated for emulator SSL bypass");
+        }
+
         _databaseName = configuration["CosmosDBDatabaseName"] ?? "BlobDataDB";
         _fileDataContainerName = configuration["CosmosDBContainerName"] ?? "ProcessedFiles";
         _phoneNumbersContainerName = configuration["CosmosDBPhoneNumbersContainerName"] ?? "PhoneNumbers";
 
-        // Configure CosmosClient to ignore certificate errors for emulator
+        // Configure CosmosClient to ignore certificate errors for emulator (HTTP + TCP)
         var cosmosClientOptions = new CosmosClientOptions
         {
+            ConnectionMode = ConnectionMode.Gateway,
+            RequestTimeout = TimeSpan.FromSeconds(30),
+            MaxRetryAttemptsOnRateLimitedRequests = 3,
+            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30),
+            // Bypass SSL validation for emulator self-signed certificate (used for all connections)
+            ServerCertificateCustomValidationCallback = (X509Certificate2 cert, X509Chain chain, SslPolicyErrors errors) => true,
             HttpClientFactory = () =>
             {
                 var handler = new HttpClientHandler
@@ -47,11 +62,7 @@ public class CosmosDbService : ICosmosDbService
                     ServerCertificateCustomValidationCallback = (message, cert, chain, errors) => true
                 };
                 return new HttpClient(handler);
-            },
-            ConnectionMode = ConnectionMode.Gateway,
-            RequestTimeout = TimeSpan.FromSeconds(30),
-            MaxRetryAttemptsOnRateLimitedRequests = 3,
-            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30)
+            }
         };
 
         _cosmosClient = new CosmosClient(connectionString, cosmosClientOptions);
