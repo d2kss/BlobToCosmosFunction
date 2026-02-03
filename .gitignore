@@ -3,6 +3,5 @@ obj/
 .vs/
 *.user
 *.suo
-local.settings.json
 .vscode/
 *.md
