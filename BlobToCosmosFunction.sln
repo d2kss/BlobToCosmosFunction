@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.2.11415.280 d18.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BlobToCosmosFunction", "BlobToCosmosFunction.csproj", "{0D466A1D-D77A-35BC-8BB3-FE55B4F22DCC}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{0D466A1D-D77A-35BC-8BB3-FE55B4F22DCC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0D466A1D-D77A-35BC-8BB3-FE55B4F22DCC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0D466A1D-D77A-35BC-8BB3-FE55B4F22DCC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0D466A1D-D77A-35BC-8BB3-FE55B4F22DCC}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {FC75C15B-D73F-4F02-89E9-38AC9EC18A9A}
+	EndGlobalSection
+EndGlobal
